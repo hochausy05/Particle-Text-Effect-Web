@@ -261,7 +261,6 @@
       return s;
     }
 
-    // Chỉ dùng chữ trên canvas ẩn để lấy tọa độ. Không có chữ thật nào được vẽ lên màn hình.
     function makeTextPoints(lines, config) {
       const off = document.createElement("canvas");
       const octx = off.getContext("2d", { willReadFrequently: true });
@@ -419,7 +418,6 @@
         const s = size[i] * sizeMul * twinkle;
 
         if (textMode) {
-          // Trong trạng thái chữ: vẽ hạt to/sáng hơn + glow giả bằng rect nhỏ, vẫn nhẹ hơn shadowBlur.
           ctx.fillRect(x[i] - s * .5, y[i] - s * .5, s, s);
           ctx.globalAlpha = .32;
           ctx.fillRect(x[i] - s, y[i] - s, s * 2, s * 2);
@@ -443,7 +441,6 @@
       ctx.globalCompositeOperation = "lighter";
       drawParticles(now);
 
-      // Lớp tăng sáng riêng cho chữ bằng chính tọa độ hạt, không phải text overlay.
       if (textMode && glyphPoints.length) {
         ctx.fillStyle = "rgba(255, 92, 215, .42)";
         for (let i = 0; i < glyphPoints.length; i += 5) {
