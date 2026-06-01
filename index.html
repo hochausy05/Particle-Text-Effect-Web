@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Particle Text Cinematic</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #05030c;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .stage {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 48% 38%, rgba(255, 60, 190, .18), transparent 23%),
+        radial-gradient(circle at 66% 62%, rgba(118, 44, 255, .11), transparent 36%),
+        radial-gradient(circle at center, #150d27 0%, #080511 52%, #020106 100%);
+    }
+
+    canvas {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+    }
+
+    .hold-wrap {
+      position: fixed;
+      left: 50%;
+      bottom: max(28px, env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      display: grid;
+      place-items: center;
+      z-index: 10;
+      transition: opacity .5s ease, transform .5s ease;
+    }
+
+    .hold-wrap.hide {
+      opacity: 0;
+      transform: translateX(-50%) translateY(26px) scale(.95);
+      pointer-events: none;
+    }
+
+    .hold-btn {
+      position: relative;
+      width: clamp(62px, 16vw, 76px);
+      height: clamp(62px, 16vw, 76px);
+      border-radius: 50%;
+      border: 1px solid rgba(255, 95, 205, .42);
+      background: radial-gradient(circle, rgba(255, 75, 205, .26), rgba(255, 75, 205, .045) 64%);
+      box-shadow:
+        0 0 22px rgba(255, 55, 190, .34),
+        inset 0 0 18px rgba(255, 55, 190, .16);
+      cursor: pointer;
+    }
+
+    .hold-btn::before {
+      content: "";
+      position: absolute;
+      inset: -12px;
+      border-radius: inherit;
+      background: conic-gradient(from 0deg, transparent, rgba(255, 82, 207, .32), transparent 38%);
+      filter: blur(1px);
+      animation: spin 3.4s linear infinite;
+      opacity: .75;
+    }
+
+    .hold-btn::after {
+      content: "";
+      position: absolute;
+      inset: 18px;
+      border-radius: 50%;
+      background: rgba(255, 78, 205, .48);
+      box-shadow: 0 0 22px rgba(255, 78, 205, .55);
+      transform: scale(.9);
+      transition: transform .18s ease;
+    }
+
+    .hold-btn.holding::after { transform: scale(1.16); }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .progress-ring {
+      position: absolute;
+      inset: -8px;
+      transform: rotate(-90deg);
+      z-index: 2;
+    }
+
+    .progress-ring circle {
+      fill: none;
+      stroke-width: 4;
+      stroke-linecap: round;
+    }
+
+    .progress-ring .track { stroke: rgba(255,255,255,.12); }
+    .progress-ring .bar {
+      stroke: #ff4ecb;
+      stroke-dasharray: 251;
+      stroke-dashoffset: 251;
+      filter: drop-shadow(0 0 5px rgba(255, 78, 203, .7));
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 2;
+      background: radial-gradient(circle at center, transparent 45%, rgba(0,0,0,.52) 100%);
+    }
+  </style>
+</head>
+<body>
+  <main class="stage">
+    <canvas id="scene"></canvas>
+
+    <div class="hold-wrap" id="holdWrap">
+      <button class="hold-btn" id="holdBtn" aria-label="Chạm giữ để bắt đầu">
+        <svg class="progress-ring" viewBox="0 0 92 92">
+          <circle class="track" cx="46" cy="46" r="40"></circle>
+          <circle class="bar" id="progressBar" cx="46" cy="46" r="40"></circle>
+        </svg>
+      </button>
+    </div>
+
+    <div class="vignette"></div>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("scene");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const holdBtn = document.getElementById("holdBtn");
+    const holdWrap = document.getElementById("holdWrap");
+    const progressBar = document.getElementById("progressBar");
+
+    const HOLD_TIME = 2000;
+    const RING_LENGTH = 251;
+
+    let w = 0;
+    let h = 0;
+    let dpr = 1;
+    let count = 0;
+    let running = true;
+    let holding = false;
+    let holdStart = 0;
+    let busy = false;
+
+    let x, y, tx, ty, vx, vy, size, phase, speed, group;
+    let textPoints = [];
+    let activeLines = [];
+    let activeConfig = null;
+    let textAlpha = 0;
+    let targetTextAlpha = 0;
+    let fieldStrength = 0.12;
+    let targetFieldStrength = 0.12;
+
+    const pointer = { x: -9999, y: -9999, active: false };
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    function particleCount() {
+      const area = window.innerWidth * window.innerHeight;
+      const mobile = window.innerWidth < 650;
+      if (reduceMotion) return mobile ? 1600 : 2600;
+      if (mobile) return Math.min(5200, Math.max(3400, Math.floor(area / 96)));
+      return Math.min(8200, Math.max(5200, Math.floor(area / 118)));
+    }
+
+    function resize() {
+      w = window.innerWidth;
+      h = window.innerHeight;
+      dpr = Math.min(window.devicePixelRatio || 1, w < 650 ? 1.12 : 1.35);
+
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      canvas.style.width = w + "px";
+      canvas.style.height = h + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      initParticles();
+      scatter(true);
+    }
+
+    function initParticles() {
+      count = particleCount();
+      x = new Float32Array(count);
+      y = new Float32Array(count);
+      tx = new Float32Array(count);
+      ty = new Float32Array(count);
+      vx = new Float32Array(count);
+      vy = new Float32Array(count);
+      size = new Float32Array(count);
+      phase = new Float32Array(count);
+      speed = new Float32Array(count);
+      group = new Uint8Array(count);
+
+      for (let i = 0; i < count; i++) {
+        x[i] = Math.random() * w;
+        y[i] = Math.random() * h;
+        vx[i] = 0;
+        vy[i] = 0;
+        size[i] = Math.random() * .9 + .55;
+        phase[i] = Math.random() * Math.PI * 2;
+        speed[i] = Math.random() * .016 + .014;
+        group[i] = i % 3;
+      }
+    }
+
+    function randomScatterPoint() {
+      const cx = w * .5;
+      const cy = h * .45;
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.pow(Math.random(), .52) * Math.max(w, h) * .64;
+      return {
+        x: cx + Math.cos(a) * r,
+        y: cy + Math.sin(a) * r * .82
+      };
+    }
+
+    function scatter(immediate) {
+      textPoints = [];
+      activeLines = [];
+      activeConfig = null;
+      targetTextAlpha = 0;
+      targetFieldStrength = .12;
+
+      for (let i = 0; i < count; i++) {
+        const p = randomScatterPoint();
+        tx[i] = p.x;
+        ty[i] = p.y;
+        speed[i] = Math.random() * .012 + .012;
+        size[i] = Math.random() * .9 + .52;
+        if (immediate) {
+          x[i] = p.x;
+          y[i] = p.y;
+        }
+      }
+    }
+
+    function fontStack(size) {
+      // Mềm hơn font sans cứng, nhưng vẫn hỗ trợ tiếng Việt tốt ở đa số máy.
+      return "900 " + size + "px Segoe Script, Brush Script MT, Comic Sans MS, Arial Rounded MT Bold, system-ui, cursive";
+    }
+
+    function measureLine(ctx2d, text, maxWidth, baseSize) {
+      let s = baseSize;
+      while (s > 28) {
+        ctx2d.font = fontStack(s);
+        if (ctx2d.measureText(text).width <= maxWidth) break;
+        s -= 2;
+      }
+      return s;
+    }
+
+    function drawText(ctx2d, lines, config, mode) {
+      const baseSize = Math.min(config.max, Math.max(config.min, w / config.divisor));
+      const lineHeight = baseSize * config.lineHeight;
+      const startY = h * config.y - ((lines.length - 1) * lineHeight) / 2;
+      const maxWidth = w * config.maxWidth;
+
+      ctx2d.textAlign = "center";
+      ctx2d.textBaseline = "middle";
+      ctx2d.lineJoin = "round";
+      ctx2d.lineCap = "round";
+
+      for (let i = 0; i < lines.length; i++) {
+        const s = measureLine(ctx2d, lines[i], maxWidth, baseSize);
+        const yy = startY + i * lineHeight;
+        ctx2d.font = fontStack(s);
+
+        if (mode === "mask") {
+          // Mask vừa đủ dày để đọc chữ, không stroke quá to gây thành cục.
+          ctx2d.fillStyle = "#fff";
+          ctx2d.strokeStyle = "#fff";
+          ctx2d.lineWidth = Math.max(1.6, s * .026);
+          ctx2d.strokeText(lines[i], w / 2, yy);
+          ctx2d.fillText(lines[i], w / 2, yy);
+        } else {
+          // Lớp chữ nền cực nhẹ: giúp mắt đọc được mặt chữ, particle vẫn là nhân vật chính.
+          ctx2d.save();
+          ctx2d.globalAlpha = textAlpha;
+          ctx2d.shadowColor = "rgba(255, 64, 200, .6)";
+          ctx2d.shadowBlur = 16;
+          ctx2d.fillStyle = "rgba(255, 67, 202, .62)";
+          ctx2d.fillText(lines[i], w / 2, yy);
+
+          ctx2d.shadowBlur = 0;
+          ctx2d.globalAlpha = textAlpha * .8;
+          ctx2d.lineWidth = Math.max(1, s * .012);
+          ctx2d.strokeStyle = "rgba(255, 235, 250, .75)";
+          ctx2d.strokeText(lines[i], w / 2, yy);
+          ctx2d.restore();
+        }
+      }
+    }
+
+    function createTextPoints(lines, config) {
+      const off = document.createElement("canvas");
+      const octx = off.getContext("2d", { willReadFrequently: true });
+      off.width = Math.floor(w);
+      off.height = Math.floor(h);
+      octx.clearRect(0, 0, w, h);
+      drawText(octx, lines, config, "mask");
+
+      const data = octx.getImageData(0, 0, off.width, off.height).data;
+      const points = [];
+      const gap = w < 650 ? 4 : 4;
+
+      for (let py = 0; py < off.height; py += gap) {
+        for (let px = 0; px < off.width; px += gap) {
+          if (data[(py * off.width + px) * 4 + 3] > 110) {
+            points.push({
+              x: px + (Math.random() - .5) * .35,
+              y: py + (Math.random() - .5) * .35
+            });
+          }
+        }
+      }
+
+      // Shuffle để đường bay đẹp, nhưng lát nữa gán tuần tự để phủ đều chữ.
+      for (let i = points.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const temp = points[i];
+        points[i] = points[j];
+        points[j] = temp;
+      }
+
+      return points;
+    }
+
+    function setText(lines, config) {
+      activeLines = lines;
+      activeConfig = config;
+      textPoints = createTextPoints(lines, config);
+      targetTextAlpha = .22;
+      targetFieldStrength = .32;
+
+      if (!textPoints.length) return;
+
+      for (let i = 0; i < count; i++) {
+        const p = textPoints[i % textPoints.length];
+        tx[i] = p.x;
+        ty[i] = p.y;
+        speed[i] = Math.random() * .012 + .028;
+        size[i] = Math.random() * .55 + .64;
+      }
+    }
+
+    function cinematicBurst(power, inward) {
+      const cx = w * .5;
+      const cy = h * .45;
+      for (let i = 0; i < count; i++) {
+        const dx = x[i] - cx;
+        const dy = y[i] - cy;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const dir = inward ? -1 : 1;
+        const p = power * (.35 + Math.random() * .75);
+        const tangent = inward ? .9 : .55;
+        vx[i] += dir * (dx / len) * p + (-dy / len) * p * tangent;
+        vy[i] += dir * (dy / len) * p + ( dx / len) * p * tangent;
+      }
+    }
+
+    function pullToCenter(duration = 520) {
+      const cx = w * .5;
+      const cy = h * .45;
+      const started = performance.now();
+
+      for (let i = 0; i < count; i++) {
+        const angle = (i / count) * Math.PI * 10;
+        const radius = 18 + Math.random() * 72;
+        tx[i] = cx + Math.cos(angle) * radius;
+        ty[i] = cy + Math.sin(angle) * radius * .55;
+        speed[i] = Math.random() * .018 + .032;
+      }
+
+      return new Promise(resolve => {
+        function check() {
+          const t = Math.min(1, (performance.now() - started) / duration);
+          targetFieldStrength = .55 * (1 - easeOutCubic(t)) + .18;
+          if (t >= 1) resolve();
+          else requestAnimationFrame(check);
+        }
+        check();
+      });
+    }
+
+    function drawParticles(now) {
+      const repelRadius = w < 650 ? 72 : 94;
+      const repelRadius2 = repelRadius * repelRadius;
+      const hasPointer = pointer.active;
+
+      drawParticleGroup(now, 0, "rgba(255, 55, 196, .82)", textPoints.length ? .92 : 1.16, hasPointer, repelRadius, repelRadius2);
+      drawParticleGroup(now, 1, "rgba(255, 120, 225, .62)", textPoints.length ? 1.02 : 1.3, hasPointer, repelRadius, repelRadius2);
+      drawParticleGroup(now, 2, "rgba(255, 226, 250, .42)", textPoints.length ? .72 : .88, hasPointer, repelRadius, repelRadius2);
+    }
+
+    function drawParticleGroup(now, g, color, sizeMul, hasPointer, repelRadius, repelRadius2) {
+      ctx.fillStyle = color;
+
+      for (let i = g; i < count; i += 3) {
+        const dx = tx[i] - x[i];
+        const dy = ty[i] - y[i];
+
+        const curl = Math.sin(now * .0012 + phase[i] + x[i] * .008) * fieldStrength;
+        vx[i] = (vx[i] + dx * speed[i] + curl) * .865;
+        vy[i] = (vy[i] + dy * speed[i] - curl * .45) * .865;
+
+        if (hasPointer) {
+          const mx = x[i] - pointer.x;
+          const my = y[i] - pointer.y;
+          const d2 = mx * mx + my * my;
+          if (d2 < repelRadius2) {
+            const d = Math.sqrt(d2) || 1;
+            const f = (1 - d / repelRadius) * 1.18;
+            vx[i] += (mx / d) * f;
+            vy[i] += (my / d) * f;
+          }
+        }
+
+        x[i] += vx[i];
+        y[i] += vy[i];
+
+        const flicker = textPoints.length ? 1 : .76 + Math.sin(now * .002 + phase[i]) * .24;
+        const s = size[i] * sizeMul * flicker;
+        ctx.fillRect(x[i], y[i], s, s);
+      }
+    }
+
+    function drawFrame(now) {
+      ctx.fillStyle = "#05030b";
+      ctx.fillRect(0, 0, w, h);
+
+      const bg = ctx.createRadialGradient(w * .48, h * .43, 0, w * .5, h * .5, Math.max(w, h) * .72);
+      bg.addColorStop(0, "rgba(255, 45, 185, .17)");
+      bg.addColorStop(.36, "rgba(67, 24, 110, .12)");
+      bg.addColorStop(1, "rgba(3, 2, 8, 0)");
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, w, h);
+
+      if (holding && !busy) {
+        const p = Math.min(1, (performance.now() - holdStart) / HOLD_TIME);
+        progressBar.style.strokeDashoffset = RING_LENGTH - RING_LENGTH * easeOutCubic(p);
+        if (p >= 1) runSequence();
+      }
+
+      textAlpha += (targetTextAlpha - textAlpha) * .045;
+      fieldStrength += (targetFieldStrength - fieldStrength) * .045;
+
+      if (activeLines.length && activeConfig) drawText(ctx, activeLines, activeConfig, "visible");
+
+      ctx.globalCompositeOperation = "lighter";
+      drawParticles(now);
+      ctx.globalCompositeOperation = "source-over";
+
+      if (running) requestAnimationFrame(drawFrame);
+    }
+
+    async function runSequence() {
+      if (busy) return;
+      busy = true;
+      holding = false;
+      holdBtn.classList.remove("holding");
+      holdWrap.classList.add("hide");
+
+      cinematicBurst(6.5, true);
+      await pullToCenter(520);
+
+      setText(["Chúc", "Mừng"], {
+        max: w < 650 ? 112 : 156,
+        min: 62,
+        divisor: w < 650 ? 4.2 : 5.25,
+        lineHeight: 1.08,
+        y: .44,
+        maxWidth: .9
+      });
+
+      await sleep(2950);
+      targetTextAlpha = 0;
+      cinematicBurst(5.2, false);
+      await sleep(260);
+      await pullToCenter(440);
+
+      setText(["Ngày", "Quốc Tế", "Thiếu Nhi"], {
+        max: w < 650 ? 78 : 118,
+        min: 40,
+        divisor: w < 650 ? 5.45 : 6.15,
+        lineHeight: 1.18,
+        y: .44,
+        maxWidth: .93
+      });
+
+      await sleep(5600);
+      resetScene();
+    }
+
+    function resetScene() {
+      busy = false;
+      holding = false;
+      progressBar.style.strokeDashoffset = RING_LENGTH;
+      holdWrap.classList.remove("hide");
+      scatter(false);
+    }
+
+    function beginHold(e) {
+      if (busy) return;
+      e.preventDefault();
+      holding = true;
+      holdStart = performance.now();
+      holdBtn.classList.add("holding");
+      updatePointer(e);
+    }
+
+    function endHold() {
+      if (busy) return;
+      holding = false;
+      progressBar.style.strokeDashoffset = RING_LENGTH;
+      holdBtn.classList.remove("holding");
+      pointer.active = false;
+    }
+
+    function updatePointer(e) {
+      const p = e.touches ? e.touches[0] : e;
+      if (!p) return;
+      pointer.x = p.clientX;
+      pointer.y = p.clientY;
+      pointer.active = true;
+    }
+
+    holdBtn.addEventListener("pointerdown", beginHold, { passive: false });
+    window.addEventListener("pointerup", endHold);
+    window.addEventListener("pointercancel", endHold);
+    window.addEventListener("pointermove", updatePointer, { passive: true });
+    window.addEventListener("resize", resize);
+
+    document.addEventListener("visibilitychange", () => {
+      running = !document.hidden;
+      if (running) requestAnimationFrame(drawFrame);
+    });
+
+    resize();
+    requestAnimationFrame(drawFrame);
+  </script>
+</body>
+</html>
